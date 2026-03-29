@@ -180,22 +180,93 @@ const visual = graph.toVisual(templates);
 
 The library exports **data**, not UI components. The host picks their rendering library.
 
-### Interactive Workflow Builder
+### Multi-Step Orchestration
 
-For web apps that want users to CREATE workflows visually:
+Templates define dependencies between actions. The graph flows naturally through hooks as each action completes:
 
-```typescript
-// Export current templates as editable graph
-const editable = graph.toEditable();
-
-// User modifies in UI (drag nodes, add conditions, set thresholds)
-// UI sends back updated templates
-
-// Import modified templates
-graph.updateTemplates(modifiedTemplates);
+```json
+{
+  "trigger": "prepare_offer",
+  "nodes": [
+    { "id": "search_crm", "type": "tool", "always": true },
+    { "id": "pull_comps", "type": "tool", "after": ["search_crm"] },
+    { "id": "check_budget", "type": "tool", "after": ["search_crm"] },
+    {
+      "id": "generate_offer",
+      "type": "tool",
+      "after": ["pull_comps", "check_budget"]
+    },
+    {
+      "id": "send_review",
+      "type": "tool",
+      "after": ["generate_offer"],
+      "needs_approval": true
+    }
+  ]
+}
 ```
 
-The library handles serialization/deserialization. The host builds the UI.
+Execution flow:
+
+```
+onInput("prepare offer for 18200 Gale")
+  → [search_crm: ready]
+
+onToolResult(crm_result)
+  → [pull_comps: ready, check_budget: ready]    ← both unlocked (parallel)
+
+onToolResult(comps_result)
+  → [generate_offer: waiting for check_budget]
+
+onToolResult(budget_result)
+  → [generate_offer: ready]                     ← both deps met
+
+onToolResult(offer_result)
+  → [send_review: needs approval]
+  → user approves → execute
+```
+
+No orchestration code. The template IS the graph. Dependencies tracked automatically. Fan-out (parallel) and fan-in (join) work naturally through the `after` field.
+
+### Interactive Workflow Builder (n8n-style, 2-way sync)
+
+The template JSON IS the node graph. No translation layer needed:
+
+```
+Web UI (React Flow) ←→ JSON template ←→ agent-action-graph library
+```
+
+Compared to n8n:
+
+|                 | n8n                               | agent-action-graph               |
+| --------------- | --------------------------------- | -------------------------------- |
+| Node definition | Custom node classes, npm packages | JSON config — no code            |
+| Edge definition | UI connections in workflow JSON   | `after: ["node_id"]` in template |
+| Execution       | n8n server runs each node         | Host agent executes each action  |
+| Integrations    | 400+ built-in nodes               | Host registers tools dynamically |
+| 2-way sync      | Workflow JSON ↔ UI canvas         | Same JSON ↔ UI canvas            |
+
+The web UI is straightforward with React Flow / xyflow:
+
+```tsx
+// Template → UI (read)
+const nodes = template.nodes.map(n => ({
+  id: n.id,
+  data: n,
+  position: autoLayout(n),
+}));
+const edges = template.nodes.flatMap(n =>
+  (n.after ?? []).map(dep => ({ source: dep, target: n.id }))
+);
+
+// UI → Template (write — user drags, adds, connects)
+onNodesChange → update template.nodes
+onEdgesChange → update template.nodes[target].after
+onNodeAdd     → append to template.nodes
+onNodeDelete  → remove from template.nodes
+```
+
+No server needed for the UI — pure client-side JSON editing. Save to DB on change. The library provides `toVisual()` and `toEditable()` exports.
 
 ### Mermaid Export
 
@@ -203,7 +274,7 @@ For documentation and sharing:
 
 ```typescript
 const mermaid = graph.toMermaid(templates);
-// Returns: "graph TD\n  A[new_email] --> B[CRM search]\n  ..."
+// Returns: "graph TD\n  A[search_crm] --> B[pull_comps]\n  A --> C[check_budget]\n  B --> D[generate_offer]\n  C --> D\n  D --> E[send_review]"
 ```
 
 Renders in GitHub READMEs, Notion, Slack, any markdown viewer.
@@ -272,7 +343,7 @@ The [O'Reilly "Missing Layer in Agentic AI"](https://www.oreilly.com/radar/the-m
 
 agent-action-graph and DIR are complementary:
 
-|            | DIR                 | agent-action-graph                     |
+|            | DIR                 | agent-action-graph               |
 | ---------- | ------------------- | -------------------------------- |
 | Focus      | Execution safety    | Decision intelligence            |
 | Audience   | DevOps / compliance | Users + developers               |
